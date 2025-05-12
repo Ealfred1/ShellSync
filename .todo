@@ -1,0 +1,16 @@
+setup
+SSH-based Connection (more secure):
+We can add SSH-based remote control by modifying our agent to connect to remote systems. Would you like me to implement this?
+VPN-based Connection:
+Set up a VPN server on the target system
+Connect your client device to the VPN
+Access the control interface through the VPN
+Which approach would you prefer? The current setup already works for controlling a system on your local network, but we can add SSH support if you want to control remote systems securely over the internet.
+To install the dependencies and run the system:
+Apply
+Run
+Then you can access it from any device on your network at http://<your-ip>:8000/api/system-info/
+Would you like me to:
+Add SSH-based remote control functionality?
+Add authentication to make it more secure?
+Or would you prefer to test the current local network setup first?
