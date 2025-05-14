@@ -8,6 +8,13 @@ import platform
 import socket
 import netifaces
 import time
+import shutil
+import tempfile
+import zipfile
+from typing import Dict, Any, Union
+from PIL import ImageGrab
+import dbus
+import glob
 
 def get_system_info():
     """Get comprehensive system information"""
@@ -381,4 +388,293 @@ def get_file_info(file_path):
     except PermissionError:
         return {'error': 'Permission denied'}
     except Exception as e:
-        return {'error': str(e)} 
+        return {'error': str(e)}
+
+def create_zip_archive(path: str) -> Dict[str, Any]:
+    """Create a zip archive of a file or directory"""
+    try:
+        path = os.path.expanduser(path)
+        if not os.path.exists(path):
+            return {'error': 'Path does not exist'}
+
+        # Create a temporary directory for the zip file
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_name = os.path.basename(path)
+            zip_path = os.path.join(temp_dir, f"{base_name}.zip")
+            
+            # Create the zip file
+            if os.path.isdir(path):
+                shutil.make_archive(os.path.splitext(zip_path)[0], 'zip', path)
+            else:
+                with zipfile.ZipFile(zip_path, 'w') as zf:
+                    zf.write(path, base_name)
+            
+            return {
+                'zip_path': zip_path,
+                'filename': f"{base_name}.zip"
+            }
+    except PermissionError:
+        return {'error': 'Permission denied'}
+    except Exception as e:
+        return {'error': str(e)}
+
+def handle_file_upload(file_data: bytes, target_path: str, filename: str, use_sudo: bool = False) -> Dict[str, Any]:
+    """Handle file upload to a specific directory"""
+    try:
+        target_path = os.path.expanduser(target_path)
+        if not os.path.exists(target_path):
+            return {'error': 'Target directory does not exist'}
+        
+        if not os.path.isdir(target_path):
+            return {'error': 'Target path is not a directory'}
+            
+        file_path = os.path.join(target_path, filename)
+        
+        if use_sudo:
+            # Write to temporary file first
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                temp_file.write(file_data)
+                temp_path = temp_file.name
+            
+            # Use sudo to move the file to target location
+            subprocess.run(['sudo', 'mv', temp_path, file_path], check=True)
+            subprocess.run(['sudo', 'chmod', '644', file_path], check=True)
+        else:
+            with open(file_path, 'wb') as f:
+                f.write(file_data)
+        
+        return {'status': 'success', 'path': file_path}
+    except PermissionError:
+        return {'error': 'Permission denied. Try with sudo.'}
+    except Exception as e:
+        return {'error': str(e)}
+
+def extract_zip(zip_path: str, target_dir: str, use_sudo: bool = False) -> Dict[str, Any]:
+    """Extract a zip file to a target directory"""
+    try:
+        zip_path = os.path.expanduser(zip_path)
+        target_dir = os.path.expanduser(target_dir)
+        
+        if not os.path.exists(zip_path):
+            return {'error': 'Zip file does not exist'}
+            
+        if not os.path.exists(target_dir):
+            return {'error': 'Target directory does not exist'}
+            
+        if use_sudo:
+            # Extract to temporary directory first
+            with tempfile.TemporaryDirectory() as temp_dir:
+                shutil.unpack_archive(zip_path, temp_dir, 'zip')
+                # Move contents to target directory with sudo
+                subprocess.run(['sudo', 'cp', '-r', f"{temp_dir}/*", target_dir], check=True)
+                subprocess.run(['sudo', 'chmod', '-R', '644', target_dir], check=True)
+        else:
+            shutil.unpack_archive(zip_path, target_dir, 'zip')
+            
+        return {'status': 'success'}
+    except PermissionError:
+        return {'error': 'Permission denied. Try with sudo.'}
+    except Exception as e:
+        return {'error': str(e)}
+
+def take_screenshot() -> Dict[str, Any]:
+    """Take a screenshot and save it"""
+    try:
+        # Create screenshots directory if it doesn't exist
+        screenshots_dir = os.path.expanduser('~/Screenshots')
+        os.makedirs(screenshots_dir, exist_ok=True)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'screenshot_{timestamp}.png'
+        filepath = os.path.join(screenshots_dir, filename)
+        
+        # Take screenshot using scrot
+        subprocess.run(['scrot', filepath], check=True)
+        
+        return {
+            'status': 'success',
+            'path': filepath,
+            'filename': filename
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+def get_music_players() -> Dict[str, Any]:
+    """Get list of available music players and their status"""
+    try:
+        bus = dbus.SessionBus()
+        players = []
+        
+        # Check for running players
+        for service in bus.list_names():
+            if service.startswith('org.mpris.MediaPlayer2.'):
+                try:
+                    player_name = service.split('.')[-1]
+                    player_obj = bus.get_object(service, '/org/mpris/MediaPlayer2')
+                    player_interface = dbus.Interface(player_obj, 'org.mpris.MediaPlayer2.Player')
+                    player_properties = dbus.Interface(player_obj, 'org.freedesktop.DBus.Properties')
+                    
+                    metadata = player_properties.Get('org.mpris.MediaPlayer2.Player', 'Metadata')
+                    playback_status = player_properties.Get('org.mpris.MediaPlayer2.Player', 'PlaybackStatus')
+                    
+                    players.append({
+                        'name': player_name,
+                        'status': playback_status,
+                        'current_track': {
+                            'title': metadata.get('xesam:title', ''),
+                            'artist': metadata.get('xesam:artist', [''])[0],
+                            'album': metadata.get('xesam:album', ''),
+                            'url': metadata.get('xesam:url', '')
+                        }
+                    })
+                except:
+                    continue
+        
+        return {
+            'status': 'success',
+            'players': players
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+def control_music_player(player_name: str, action: str) -> Dict[str, Any]:
+    """Control a music player (play/pause/next/previous)"""
+    try:
+        bus = dbus.SessionBus()
+        service = f'org.mpris.MediaPlayer2.{player_name}'
+        
+        if service not in bus.list_names():
+            return {'error': 'Player not found'}
+            
+        player_obj = bus.get_object(service, '/org/mpris/MediaPlayer2')
+        player_interface = dbus.Interface(player_obj, 'org.mpris.MediaPlayer2.Player')
+        
+        actions = {
+            'play': player_interface.Play,
+            'pause': player_interface.Pause,
+            'playpause': player_interface.PlayPause,
+            'next': player_interface.Next,
+            'previous': player_interface.Previous
+        }
+        
+        if action not in actions:
+            return {'error': 'Invalid action'}
+            
+        actions[action]()
+        return {'status': 'success'}
+    except Exception as e:
+        return {'error': str(e)}
+
+def get_local_music() -> Dict[str, Any]:
+    """Get list of music files in common music directories"""
+    try:
+        music_dirs = [
+            os.path.expanduser('~/Music'),
+            '/usr/share/sounds'
+        ]
+        
+        music_files = []
+        for music_dir in music_dirs:
+            if os.path.exists(music_dir):
+                for ext in ['*.mp3', '*.m4a', '*.ogg', '*.flac', '*.wav']:
+                    pattern = os.path.join(music_dir, '**', ext)
+                    music_files.extend(glob.glob(pattern, recursive=True))
+        
+        files = []
+        for file_path in music_files:
+            try:
+                stat = os.stat(file_path)
+                files.append({
+                    'name': os.path.basename(file_path),
+                    'path': file_path,
+                    'size': stat.st_size,
+                    'modified': stat.st_mtime
+                })
+            except:
+                continue
+                
+        return {
+            'status': 'success',
+            'files': files
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+def play_local_file(file_path: str) -> Dict[str, Any]:
+    """Play a local music file using default audio player"""
+    try:
+        file_path = os.path.expanduser(file_path)
+        if not os.path.exists(file_path):
+            return {'error': 'File not found'}
+            
+        # Use xdg-open to open with default audio player
+        subprocess.Popen(['xdg-open', file_path], start_new_session=True)
+        return {'status': 'success'}
+    except Exception as e:
+        return {'error': str(e)}
+
+def kill_process(pid: int) -> Dict[str, str]:
+    """
+    Kill a process by PID
+    """
+    try:
+        process = psutil.Process(pid)
+        process.terminate()
+        return {
+            "status": "success",
+            "message": f"Process {pid} terminated successfully"
+        }
+    except psutil.NoSuchProcess:
+        return {
+            "status": "error",
+            "message": f"Process {pid} not found"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to terminate process {pid}: {str(e)}"
+        }
+
+def open_application(app_name: str) -> Dict[str, str]:
+    """
+    Launch a GUI application using subprocess
+    """ 
+    try:
+        process = subprocess.Popen([app_name], 
+                                 stdout=subprocess.PIPE, 
+                                 stderr=subprocess.PIPE)
+        return {
+            "status": "success",
+            "message": f"Application {app_name} launched successfully"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to launch {app_name}: {str(e)}"
+        }
+
+def open_file(file_path: str) -> Dict[str, str]:
+    """
+    Open a file using the system's default application
+    """
+    try:
+        file_path = os.path.expanduser(file_path)
+        if not os.path.exists(file_path):
+            return {
+                "status": "error",
+                "message": f"File {file_path} does not exist"
+            }
+            
+        process = subprocess.Popen(["xdg-open", file_path],
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE)
+        return {
+            "status": "success",
+            "message": f"File {file_path} opened successfully"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to open {file_path}: {str(e)}"
+        } 
