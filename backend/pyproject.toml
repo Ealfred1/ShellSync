@@ -14,6 +14,7 @@ netifaces = "^0.11.0"
 dbus-python = "^1.4.0"
 psutils = "^3.3.10"
 pillow = "^11.2.1"
+python-xlib = "^0.33"
 
 
 [build-system]

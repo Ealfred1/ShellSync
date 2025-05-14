@@ -68,10 +68,17 @@ def launch_application(request):
     try:
         data = json.loads(request.body)
         app_name = data.get('app_name')
+        use_sudo = data.get('use_sudo', True)  # Default to True for permissions
+        sudo_password = data.get('sudo_password')
+        
         if not app_name:
             return JsonResponse({'error': 'app_name is required'}, status=400)
         
-        result = open_application(app_name)
+        result = launch_app(app_name, use_sudo, sudo_password)
+        if 'error' in result:
+            if result.get('error') == 'sudo_password_required':
+                return JsonResponse(result, status=403)  # Special status for password required
+            return JsonResponse(result, status=500)
         return JsonResponse(result)
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)
@@ -222,6 +229,7 @@ def file_info(request):
 @require_http_methods(["GET"])
 def download_item(request):
     """Download a file or directory (as zip)"""
+    temp_dir = None
     try:
         path = request.GET.get('path')
         if not path:
@@ -236,9 +244,18 @@ def download_item(request):
             if 'error' in result:
                 return JsonResponse(result, status=500)
                 
-            response = FileResponse(open(result['zip_path'], 'rb'))
-            response['Content-Disposition'] = f'attachment; filename="{result["filename"]}"'
-            return response
+            # Get the temporary directory path from the zip path
+            temp_dir = os.path.dirname(result['zip_path'])
+            
+            try:
+                response = FileResponse(open(result['zip_path'], 'rb'))
+                response['Content-Disposition'] = f'attachment; filename="{result["filename"]}"'
+                return response
+            finally:
+                # Clean up the temporary directory in a finally block
+                if temp_dir and os.path.exists(temp_dir):
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
         else:
             # Single file download
             response = FileResponse(open(path, 'rb'))
@@ -247,6 +264,10 @@ def download_item(request):
     except PermissionError:
         return JsonResponse({'error': 'Permission denied'}, status=403)
     except Exception as e:
+        # Clean up temp dir if it exists
+        if temp_dir and os.path.exists(temp_dir):
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
         return JsonResponse({'error': str(e)}, status=500)
 
 @csrf_exempt
@@ -378,10 +399,14 @@ def kill_process(request):
     try:
         data = json.loads(request.body)
         pid = data.get('pid')
+        use_sudo = data.get('use_sudo', False)
+        
         if not pid:
             return JsonResponse({'error': 'pid is required'}, status=400)
-        
-        result = kill_process(int(pid))  # Convert pid to integer
+            
+        result = kill_process(pid, use_sudo)
+        if result['status'] == 'error':
+            return JsonResponse(result, status=500)
         return JsonResponse(result)
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON'}, status=400)

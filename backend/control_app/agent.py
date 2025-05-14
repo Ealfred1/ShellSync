@@ -244,7 +244,7 @@ def list_directory(path='/'):
     except Exception as e:
         return {'error': str(e)}
 
-def launch_application(app_path):
+def launch_application(app_path, use_sudo=False, sudo_password=None):
     """Launch an application from its .desktop file"""
     try:
         if not app_path.endswith('.desktop'):
@@ -260,9 +260,55 @@ def launch_application(app_path):
         # Split the command into parts and remove any quotes
         cmd_parts = [part.strip('"\'') for part in exec_cmd.split()]
         
-        # Launch the application
-        subprocess.Popen(cmd_parts, start_new_session=True)
+        # Get current user's environment
+        user_env = os.environ.copy()
+        
+        if use_sudo:
+            if not sudo_password:
+                return {'error': 'sudo_password_required', 'message': 'Please provide sudo password'}
+            
+            # Create a wrapper script that sets up the environment
+            script_content = f"""#!/bin/bash
+export DISPLAY="{os.environ.get('DISPLAY', ':0')}"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/{os.getuid()}/bus"
+export XDG_RUNTIME_DIR="/run/user/{os.getuid()}"
+{' '.join(cmd_parts)}
+"""
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as f:
+                f.write(script_content)
+                temp_script = f.name
+            os.chmod(temp_script, 0o755)
+            
+            try:
+                # Use sudo with the wrapper script
+                cmd = ['sudo', '-S', '-E', temp_script]
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=user_env,
+                    text=True
+                )
+                stdout, stderr = process.communicate(input=f"{sudo_password}\n")
+                
+                if process.returncode != 0:
+                    if "incorrect password" in stderr.lower():
+                        return {'error': 'incorrect_password', 'message': 'Incorrect sudo password'}
+                    return {'error': f'Failed to launch: {stderr}'}
+            finally:
+                # Clean up the temporary script
+                try:
+                    os.unlink(temp_script)
+                except:
+                    pass
+        else:
+            # Launch directly without sudo
+            subprocess.Popen(cmd_parts, env=user_env, start_new_session=True)
+            
         return {'status': 'success', 'command': exec_cmd}
+    except PermissionError:
+        return {'error': 'sudo_password_required', 'message': 'Permission denied. Please provide sudo password.'}
     except Exception as e:
         return {'error': str(e)}
 
@@ -391,30 +437,45 @@ def get_file_info(file_path):
         return {'error': str(e)}
 
 def create_zip_archive(path: str) -> Dict[str, Any]:
-    """Create a zip archive of a file or directory"""
+    """Create a zip archive of a directory"""
     try:
-        path = os.path.expanduser(path)
+        import os
+        import tempfile
+        import shutil
+        from pathlib import Path
+        
+        # Ensure path exists and is a directory
         if not os.path.exists(path):
             return {'error': 'Path does not exist'}
-
-        # Create a temporary directory for the zip file
-        with tempfile.TemporaryDirectory() as temp_dir:
-            base_name = os.path.basename(path)
-            zip_path = os.path.join(temp_dir, f"{base_name}.zip")
+        if not os.path.isdir(path):
+            return {'error': 'Path is not a directory'}
             
-            # Create the zip file
-            if os.path.isdir(path):
-                shutil.make_archive(os.path.splitext(zip_path)[0], 'zip', path)
-            else:
-                with zipfile.ZipFile(zip_path, 'w') as zf:
-                    zf.write(path, base_name)
+        # Create a temporary directory that will definitely exist
+        temp_dir = tempfile.mkdtemp()
+        
+        try:
+            # Create zip file name based on directory name
+            dir_name = os.path.basename(path.rstrip('/'))
+            zip_name = f"{dir_name}.zip"
+            zip_path = os.path.join(temp_dir, zip_name)
+            
+            # Create the zip archive
+            shutil.make_archive(
+                os.path.join(temp_dir, dir_name),  # Base name (without .zip)
+                'zip',  # Format
+                path  # Root directory to zip
+            )
             
             return {
                 'zip_path': zip_path,
-                'filename': f"{base_name}.zip"
+                'filename': zip_name
             }
-    except PermissionError:
-        return {'error': 'Permission denied'}
+            
+        except Exception as e:
+            # Clean up temp dir in case of error
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return {'error': str(e)}
+            
     except Exception as e:
         return {'error': str(e)}
 
@@ -489,14 +550,32 @@ def take_screenshot() -> Dict[str, Any]:
         filename = f'screenshot_{timestamp}.png'
         filepath = os.path.join(screenshots_dir, filename)
         
-        # Take screenshot using scrot
-        subprocess.run(['scrot', filepath], check=True)
+        # Try different screenshot methods
+        try:
+            # First try using gnome-screenshot
+            subprocess.run(['gnome-screenshot', '-f', filepath], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            try:
+                # Try using import from ImageMagick
+                subprocess.run(['import', '-window', 'root', filepath], check=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                try:
+                    # Try using scrot as fallback
+                    subprocess.run(['scrot', filepath], check=True)
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    # If all else fails, use PIL
+                    screenshot = ImageGrab.grab()
+                    screenshot.save(filepath)
         
-        return {
-            'status': 'success',
-            'path': filepath,
-            'filename': filename
-        }
+        if os.path.exists(filepath):
+            return {
+                'status': 'success',
+                'path': filepath,
+                'filename': filename
+            }
+        else:
+            return {'error': 'Failed to save screenshot'}
+            
     except Exception as e:
         return {'error': str(e)}
 
@@ -540,11 +619,11 @@ def get_music_players() -> Dict[str, Any]:
 
 def control_music_player(player_name: str, action: str) -> Dict[str, Any]:
     """Control a music player (play/pause/next/previous)"""
-    try:
+    try: 
         bus = dbus.SessionBus()
         service = f'org.mpris.MediaPlayer2.{player_name}'
-        
-        if service not in bus.list_names():
+          
+        if service not in bus.list_names(): 
             return {'error': 'Player not found'}
             
         player_obj = bus.get_object(service, '/org/mpris/MediaPlayer2')
@@ -567,7 +646,7 @@ def control_music_player(player_name: str, action: str) -> Dict[str, Any]:
         return {'error': str(e)}
 
 def get_local_music() -> Dict[str, Any]:
-    """Get list of music files in common music directories"""
+    """Get list of music files in common music directories""" 
     try:
         music_dirs = [
             os.path.expanduser('~/Music'),
@@ -601,34 +680,42 @@ def get_local_music() -> Dict[str, Any]:
     except Exception as e:
         return {'error': str(e)}
 
-def play_local_file(file_path: str) -> Dict[str, Any]:
+def play_local_file(file_path: str) -> Dict[str, Any]: 
     """Play a local music file using default audio player"""
     try:
         file_path = os.path.expanduser(file_path)
         if not os.path.exists(file_path):
             return {'error': 'File not found'}
             
-        # Use xdg-open to open with default audio player
+        
         subprocess.Popen(['xdg-open', file_path], start_new_session=True)
         return {'status': 'success'}
     except Exception as e:
         return {'error': str(e)}
 
-def kill_process(pid: int) -> Dict[str, str]:
+def kill_process(pid: int, use_sudo: bool = False) -> Dict[str, str]:
     """
     Kill a process by PID
     """
     try:
-        process = psutil.Process(pid)
-        process.terminate()
+        if use_sudo:
+            subprocess.run(['sudo', 'kill', str(pid)], check=True)
+        else:
+            process = psutil.Process(pid)
+            process.terminate()
         return {
             "status": "success",
             "message": f"Process {pid} terminated successfully"
-        }
+        } 
     except psutil.NoSuchProcess:
         return {
             "status": "error",
             "message": f"Process {pid} not found"
+        }
+    except subprocess.CalledProcessError:
+        return {
+            "status": "error",
+            "message": f"Failed to terminate process {pid} with sudo"
         }
     except Exception as e:
         return {
