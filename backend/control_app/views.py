@@ -2,9 +2,15 @@ from django.shortcuts import render
 from django.http import JsonResponse, FileResponse, HttpResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework_simplejwt.tokens import RefreshToken
 import json
 import logging
 import os
+from .discovery import DeviceDiscovery
 from .agent import (
     get_system_info,
     get_running_processes,
@@ -28,60 +34,179 @@ from .agent import (
     open_application,
     open_file
 )
+import socket
+import uuid
+import zeroconf
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# Create your views here.
+# Store active pairing codes temporarily
+PAIRING_CODES = {}
 
+class DeviceDiscoveryService:
+    def __init__(self):
+        self.zc = zeroconf.Zeroconf()
+        self.service_type = "_shellsync._tcp.local."
+        self.local_device = None
+        self.register_local_device()
+
+    def register_local_device(self):
+        hostname = socket.gethostname()
+        ip_address = socket.gethostbyname(hostname)
+        
+        self.local_device = {
+            'id': str(uuid.uuid4()),
+            'name': hostname,
+            'ip': ip_address,
+            'port': 8000,
+        }
+        
+        info = zeroconf.ServiceInfo(
+            self.service_type,
+            f"{hostname}.{self.service_type}",
+            addresses=[socket.inet_aton(ip_address)],
+            port=8000,
+            properties={
+                'id': self.local_device['id'],
+                'name': hostname,
+            }
+        )
+        
+        self.zc.register_service(info)
+
+    def discover_devices(self):
+        # In a real implementation, this would use zeroconf to discover other devices
+        # For now, we'll just return the local device
+        return [
+            {
+                'id': self.local_device['id'],
+                'name': self.local_device['name'],
+                'ip': self.local_device['ip'],
+                'status': 'available'
+            }
+        ]
+
+    def close(self):
+        self.zc.close()
+
+# Create a global instance
+discovery_service = DeviceDiscoveryService()
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def discover_devices(request):
+    """Discover available devices on the network."""
+    devices = discovery_service.discover_devices()
+    return Response({'devices': devices})
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def request_pairing(request):
+    """Generate a pairing code for device connection."""
+    device_id = request.data.get('device_id')
+    if not device_id:
+        return Response({'error': 'Device ID is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Generate a 6-digit pairing code
+    pairing_code = str(uuid.uuid4().int)[:6]
+    
+    # Store the pairing code with expiration
+    PAIRING_CODES[device_id] = {
+        'code': pairing_code,
+        'expires_at': datetime.now() + timedelta(minutes=5)
+    }
+    
+    return Response({'pairing_code': pairing_code})
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_pairing(request):
+    """Verify pairing code and generate access tokens."""
+    device_id = request.data.get('device_id')
+    code = request.data.get('code')
+    
+    if not device_id or not code:
+        return Response(
+            {'error': 'Device ID and code are required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Check if pairing code exists and is valid
+    pairing_info = PAIRING_CODES.get(device_id)
+    if not pairing_info or pairing_info['code'] != code:
+        return Response(
+            {'error': 'Invalid pairing code'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Check if code has expired
+    if datetime.now() > pairing_info['expires_at']:
+        PAIRING_CODES.pop(device_id, None)
+        return Response(
+            {'error': 'Pairing code has expired'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Generate tokens
+    refresh = RefreshToken.for_user(request.user)
+    
+    # Remove used pairing code
+    PAIRING_CODES.pop(device_id, None)
+    
+    return Response({
+        'access': str(refresh.access_token),
+        'refresh': str(refresh)
+    })
+
+@api_view(['POST'])
+def disconnect(request):
+    """Handle device disconnection."""
+    # Clear any session data if needed
+    return Response({'status': 'disconnected'})
+
+# Protected endpoints that require authentication
 @csrf_exempt
-@require_http_methods(["GET"])
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def system_info(request):
     try:
         info = get_system_info()
-        logger.debug(f"System info retrieved: {info}")  # Debug log
+        logger.debug(f"System info retrieved: {info}")
         return JsonResponse(info)
     except Exception as e:
         logger.error(f"Error getting system info: {str(e)}")
         return JsonResponse({'error': str(e)}, status=500)
 
 @csrf_exempt
-@require_http_methods(["GET"])
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def running_processes(request):
     try:
         processes = get_running_processes()
-        return JsonResponse({'processes': processes['data'] if isinstance(processes, dict) else processes}, safe=True)
+        return JsonResponse({'processes': processes})
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
 @csrf_exempt
-@require_http_methods(["GET"])
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def applications(request):
     try:
         apps = list_applications()
-        return JsonResponse({'applications': apps}, safe=True)
+        return JsonResponse({'applications': apps})
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 
 @csrf_exempt
-@require_http_methods(["POST"])
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def launch_application(request):
     try:
         data = json.loads(request.body)
-        app_name = data.get('app_name')
-        use_sudo = data.get('use_sudo', True)  # Default to True for permissions
-        sudo_password = data.get('sudo_password')
-        
-        if not app_name:
-            return JsonResponse({'error': 'app_name is required'}, status=400)
-        
-        result = launch_app(app_name, use_sudo, sudo_password)
-        if 'error' in result:
-            if result.get('error') == 'sudo_password_required':
-                return JsonResponse(result, status=403)  # Special status for password required
-            return JsonResponse(result, status=500)
+        app_id = data.get('app_id')
+        result = launch_app(app_id)
         return JsonResponse(result)
-    except json.JSONDecodeError:
-        return JsonResponse({'error': 'Invalid JSON'}, status=400)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
 

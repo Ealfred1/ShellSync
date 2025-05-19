@@ -1,26 +1,30 @@
 from django.urls import path
+from rest_framework_simplejwt.views import TokenRefreshView
 from . import views
 
 urlpatterns = [
-    path('system-info/', views.system_info, name='system-info'),
-    path('running-processes/', views.running_processes, name='running-processes'),
-    path('list-applications/', views.applications, name='list-applications'),
-    path('launch-application/', views.launch_application, name='launch-application'),
-    path('open-file/', views.open_file_handler, name='open-file'),
-    path('list-directory/', views.directory, name='list-directory'),
-    path('kill-process/', views.kill_process, name='kill-process'),
-    path('take-screenshot/', views.screenshot, name='take-screenshot'),
-    path('local-music/', views.local_music, name='local-music'),
-    path('music-players/', views.music_players, name='music-players'),
-    path('control-player/', views.control_player, name='control-player'),
-    path('play-music/', views.play_music, name='play-music'),
-    path('file-info/', views.file_info, name='file-info'),
-    path('read-file/', views.read_file, name='read-file'),
-    path('download-file/', views.download_file, name='download-file'),
-    path('download-item/', views.download_item, name='download-item'),
-    path('write-file/', views.write_file, name='write-file'),
-    path('create-dir/', views.create_dir, name='create-dir'),
-    path('delete-item/', views.delete_item, name='delete-item'),
-    path('upload-file/', views.upload_file, name='upload-file'),
-    path('extract-zip/', views.extract_zip_file, name='extract-zip'),
+    # Device Discovery and Authentication
+    path('discover/', views.discover_devices, name='discover_devices'),
+    path('auth/request-pairing/', views.request_pairing, name='request_pairing'),
+    path('auth/verify-pairing/', views.verify_pairing, name='verify_pairing'),
+    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('disconnect/', views.disconnect, name='disconnect'),
+
+    # File System Operations
+    path('list-directory/', views.list_directory, name='list_directory'),
+    path('file-info/', views.file_info, name='file_info'),
+    path('read-file/', views.read_file, name='read_file'),
+    path('write-file/', views.write_file, name='write_file'),
+    path('create-dir/', views.create_directory, name='create_directory'),
+    path('delete-item/', views.delete_item, name='delete_item'),
+    path('download-file/', views.download_file, name='download_file'),
+    path('upload-file/', views.upload_file, name='upload_file'),
+    path('extract-zip/', views.extract_zip, name='extract_zip'),
+
+    # System Information
+    path('system-info/', views.system_info, name='system_info'),
+    path('running-processes/', views.running_processes, name='running_processes'),
+    path('kill-process/', views.kill_process, name='kill_process'),
+    path('list-applications/', views.list_applications, name='list_applications'),
+    path('launch-application/', views.launch_application, name='launch_application'),
 ] 
